@@ -1,0 +1,39 @@
+{
+  "name": "@astraler/generate-image-skill",
+  "version": "1.0.4",
+  "description": "Astraler image generation skill for Claude Code — generates high-quality images using Google Gemini / Imagen 3 API",
+  "scripts": {
+    "test": "echo 'No tests yet'"
+  },
+  "files": [
+    "SKILL.md",
+    "scripts/",
+    "references/"
+  ],
+  "keywords": [
+    "claude-code",
+    "skill",
+    "agent-skill",
+    "astraler",
+    "astraler-skill",
+    "google",
+    "gemini",
+    "imagen",
+    "image-generation",
+    "ai-art",
+    "claude"
+  ],
+  "author": "Tran Thien",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git@github.com:thientranhung/astraler-generate-image-skill.git"
+  },
+  "bugs": {
+    "url": "https://github.com/thientranhung/astraler-generate-image-skill/issues"
+  },
+  "homepage": "https://github.com/thientranhung/astraler-generate-image-skill#readme",
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}
