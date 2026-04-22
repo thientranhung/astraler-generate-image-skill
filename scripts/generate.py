@@ -86,7 +86,7 @@ def generate_image(prompt, output_file, model_name=None, aspect_ratio="1:1"):
                     print(json.dumps(result, indent=2), file=sys.stderr)
                     sys.exit(1)
                     
-                b64_image = predictions[0].get("bytesBase64")
+                b64_image = predictions[0].get("bytesBase64Encoded") or predictions[0].get("bytesBase64")
             
             if not b64_image:
                 print("Error: No image bytes returned.", file=sys.stderr)

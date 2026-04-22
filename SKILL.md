@@ -1,7 +1,7 @@
 ---
 name: astraler-generate-image
 description: >
-  Astraler's image generation skill — generates images via Google Gemini / Imagen 3 API.
+  Astraler's image generation skill — generates images via Google Gemini / Imagen 4 API.
   ONLY activate this skill when user explicitly mentions "Astraler" in an image generation context.
   Trigger phrases: "Astraler tạo ảnh", "Astraler vẽ", "dùng Astraler generate image",
   "Astraler draw", "Astraler image", "tạo ảnh bằng Astraler", "nhờ Astraler vẽ",
@@ -14,7 +14,7 @@ allowed-tools: Read, Bash
 
 # Astraler Generate Image
 
-Astraler's image generation skill — creates high-quality images via Google's official Gemini/Imagen 3 API using a bundled Python script.
+Astraler's image generation skill — creates high-quality images via Google's official Gemini/Imagen 4 API using a bundled Python script.
 
 ## Instructions
 
@@ -100,15 +100,15 @@ python3 "$SKILL_DIR/scripts/generate.py" \
   --aspect_ratio "9:16"
 ```
 
-### Example 3: Choose specific model
-**User asks**: "Dùng Imagen 3 vẽ ảnh núi lúc hoàng hôn"
+### Example 3: Choose specific model (Imagen 4)
+**User asks**: "Dùng Imagen 4 vẽ ảnh núi lúc hoàng hôn"
 
 ```bash
 python3 "$SKILL_DIR/scripts/generate.py" \
   --prompt "majestic mountain landscape at sunset, golden hour, dramatic clouds, epic scale" \
   --output "mountain_sunset.png" \
   --aspect_ratio "16:9" \
-  --model "imagen-3.0-generate-002"
+  --model "imagen-4.0-generate-001"
 ```
 
 ## Limitations
@@ -116,7 +116,7 @@ python3 "$SKILL_DIR/scripts/generate.py" \
 - Requires a valid `GEMINI_API_KEY` — free tier available at Google AI Studio
 - Image content must comply with Google's usage policies (no violence, explicit content)
 - Script requires Python 3.8+ (uses stdlib only, no pip install needed)
-- `gemini-2.0-flash-exp` may return text instead of image for some prompts — use `imagen-3.0-generate-002` for reliable image output
+- `gemini-2.0-flash-exp` may return text instead of image — use `gemini-3-pro-image-preview` (default) or `imagen-4.0-generate-001` for reliable image output
 
 ## Configuration
 
@@ -128,7 +128,12 @@ After installation, edit the `.env` file in the skill directory:
 
 Available options:
 - `GEMINI_API_KEY`: Your Google AI Studio API key (required)
-- `IMAGE_MODEL`: Default model — `imagen-3.0-generate-002` or `gemini-2.0-flash-exp`
+- `IMAGE_MODEL`: Default model — `gemini-3-pro-image-preview` — **default**, reliable image output ✅
+- `gemini-3.1-flash-image-preview` — newer, faster variant ✅
+- `gemini-2.5-flash-image` — Gemini 2.5 Flash image model ✅
+- `imagen-4.0-generate-001` — Imagen 4, highest quality (uses `predict` endpoint) ✅
+- `imagen-4.0-fast-generate-001` — Imagen 4 Fast, quicker generation ✅
+- ~~`imagen-3.0-generate-002`~~ — **NOT available** via AI Studio API ❌
 
 ## Additional Resources
 
