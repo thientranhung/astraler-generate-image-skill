@@ -10,18 +10,26 @@
 npx skills add thientranhung/astraler-generate-image-skill
 ```
 
-The `skills` CLI will guide you through the installation interactively — asking whether to install globally (`~/.agents/skills/`) or at project level.
+The `skills` CLI will guide you through the installation interactively — asking whether to install globally (`~/.agents/skills/`) or at project level (`.agents/skills/`).
 
 ### Update
 
 ```bash
+# Global
 npx skills update astraler-generate-image -g
+
+# Project
+npx skills update astraler-generate-image
 ```
 
 ### Uninstall
 
 ```bash
+# Global
 npx skills remove astraler-generate-image -g
+
+# Project
+npx skills remove astraler-generate-image
 ```
 
 ---
@@ -31,7 +39,12 @@ npx skills remove astraler-generate-image -g
 After installation, set your Gemini API key:
 
 ```bash
+# If installed globally
 nano ~/.agents/skills/astraler-generate-image/.env
+
+# If installed at project level
+nano .agents/skills/astraler-generate-image/.env
+
 # Set: GEMINI_API_KEY=your_key_here
 ```
 
