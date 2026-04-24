@@ -38,7 +38,7 @@ Astraler's image generation skill — creates high-quality images via:
 
 | User says | Provider | Default model |
 |---|---|---|
-| "astraler image gpt", "astraler openai", "astraler chatgpt image", "astraler gpt-image-2" … | OpenAI | `gpt-image-2` |
+| "astraler image gpt", "astraler openai", "astraler chatgpt image", "astraler gpt-image-1" … | OpenAI | `gpt-image-1` |
 | "astraler vẽ", "astraler image", "astraler gemini", "astraler imagen" … | Google | `gemini-3-pro-image-preview` |
 
 ### Step 1: Locate skill directory + verify API key
@@ -167,9 +167,9 @@ python3 "$SKILL_DIR/scripts/generate.py" \
 
 | Model | Quality | Speed | Notes |
 |-------|---------|-------|-------|
-| `gpt-image-2` | ⭐⭐⭐⭐⭐ | Medium | **Default**, latest generation ✅ |
-| `gpt-image-1.5` | ⭐⭐⭐⭐⭐ | Medium | Previous gen, high quality |
-| `gpt-image-1` | ⭐⭐⭐⭐ | Medium | Stable, widely supported |
+| `gpt-image-1` | ⭐⭐⭐⭐⭐ | Medium | **Default**, stable & recommended ✅ |
+| `gpt-image-1.5` | ⭐⭐⭐⭐⭐ | Medium | Higher quality variant ✅ |
+| `gpt-image-2` | ⭐⭐⭐⭐⭐ | Medium | Requires org verification ⚠️ |
 | `gpt-image-1-mini` | ⭐⭐⭐ | Fast | Cheaper, good for drafts |
 
 **Sizes for GPT-image:**
