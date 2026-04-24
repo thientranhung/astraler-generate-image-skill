@@ -1,107 +1,155 @@
 ---
 name: astraler-generate-image
 description: >
-  Astraler's image generation skill — generates images via Google Gemini / Imagen 4 API.
+  Astraler's image generation skill — generates images via Google Gemini/Imagen API
+  OR OpenAI GPT-image models (gpt-image-1, gpt-image-1-mini, gpt-image-1.5).
+
   ONLY activate this skill when user explicitly mentions "Astraler" in an image generation context.
-  Trigger phrases: "Astraler tạo ảnh", "Astraler vẽ", "dùng Astraler generate image",
-  "Astraler draw", "Astraler image", "tạo ảnh bằng Astraler", "nhờ Astraler vẽ",
-  "Astraler vẽ cho tôi", "dùng Astraler để vẽ", "Astraler create image",
-  "astraler generate", "astraler picture", "astraler art".
-  Do NOT trigger for generic image requests without the word "Astraler" — those should use the platform's built-in image tool.
+
+  GOOGLE / GEMINI trigger phrases:
+    "Astraler tạo ảnh", "Astraler vẽ", "dùng Astraler generate image",
+    "Astraler draw", "Astraler image", "tạo ảnh bằng Astraler",
+    "nhờ Astraler vẽ", "Astraler vẽ cho tôi", "dùng Astraler để vẽ",
+    "Astraler create image", "astraler generate", "astraler picture", "astraler art",
+    "astraler gemini", "astraler imagen".
+
+  OPENAI / GPT-IMAGE trigger phrases (route to OpenAI API):
+    "astraler image gpt", "astraler image openai", "astraler gpt image",
+    "astraler openai", "astraler dùng openai", "astraler gpt-image",
+    "astraler image gpt-image-1", "astraler chatgpt image",
+    "astraler vẽ bằng openai", "astraler tạo ảnh openai".
+
+  Do NOT trigger for generic image requests without the word "Astraler".
   Supports aspect ratios: 1:1 (default), 16:9, 9:16, 4:3, 3:4.
 allowed-tools: Read, Bash
 ---
 
 # Astraler Generate Image
 
-Astraler's image generation skill — creates high-quality images via Google's official Gemini/Imagen 4 API using a bundled Python script.
+Astraler's image generation skill — creates high-quality images via:
+- **Google Gemini / Imagen 4** (default) — uses `GEMINI_API_KEY`
+- **OpenAI GPT-image models** — uses `OPENAI_API_KEY`
+
+---
 
 ## Instructions
 
-### Step 0: Locate the skill + verify API key
+### Step 0: Detect provider from user's request
 
-Run this to find the installed skill directory:
+| User says | Provider | Default model |
+|---|---|---|
+| "astraler image gpt", "astraler openai", "astraler chatgpt image", "astraler gpt-image-2" … | OpenAI | `gpt-image-2` |
+| "astraler vẽ", "astraler image", "astraler gemini", "astraler imagen" … | Google | `gemini-3-pro-image-preview` |
 
-```bash
-find "$HOME/.claude/skills/astraler-generate-image" -name "generate.py" 2>/dev/null | head -1 \
-  || find "$HOME" -name "generate.py" -path "*/astraler-generate-image/scripts/*" 2>/dev/null | head -1
-```
-
-Then check if the API key is configured:
+### Step 1: Locate skill directory + verify API key
 
 ```bash
-cat "$SKILL_DIR/.env" 2>/dev/null | grep GEMINI_API_KEY
+SKILL_DIR=$(find "$HOME/.gemini/antigravity/skills/astraler-generate-image" -maxdepth 0 2>/dev/null \
+  || find "$HOME/.claude/skills/astraler-generate-image" -maxdepth 0 2>/dev/null)
+echo "Skill dir: $SKILL_DIR"
+cat "$SKILL_DIR/.env"
 ```
 
-If still showing placeholder `your_gemini_api_key_here`, ask the user to configure it:
-- **Option A:** Edit `$SKILL_DIR/.env` — key persists across sessions
-- **Option B:** `export GEMINI_API_KEY=their_key` in terminal — current session only
-- **Option C:** Add to `~/.zshrc` — permanent
+**For Google (Gemini/Imagen):** needs `GEMINI_API_KEY`
+- Get free key: https://aistudio.google.com/app/apikey
 
-Get a free key at: https://aistudio.google.com/app/apikey
+**For OpenAI (GPT-image):** needs `OPENAI_API_KEY`
+- Get key: https://platform.openai.com/api-keys
 
-### Step 1: Craft a detailed prompt
+Configure in `$SKILL_DIR/.env`:
+```
+GEMINI_API_KEY=your_key_here
+OPENAI_API_KEY=your_key_here
+```
+
+### Step 2: Craft a detailed prompt
 
 Enhance the user's prompt with quality modifiers:
 - Style: `cinematic lighting`, `4K`, `photorealistic`, `high detail`
 - Keep it descriptive and specific
 
-### Step 2: Determine aspect ratio
+### Step 3: Determine aspect ratio
 
-If not specified, ask. Common choices:
-- `1:1` — square (default, social media)
-- `16:9` — widescreen / landscape
-- `9:16` — portrait / mobile / Story
-- `4:3` — classic / presentation
+| Ratio | Use case |
+|-------|----------|
+| `1:1` | Square — social media (default) |
+| `16:9` | Landscape / widescreen |
+| `9:16` | Portrait / mobile / Stories |
+| `4:3` | Classic / presentation |
+| `3:4` | Tall portrait |
 
-### Step 3: Run the script
+### Step 4: Run the script
 
+**Google Gemini/Imagen (default):**
 ```bash
 python3 "$SKILL_DIR/scripts/generate.py" \
   --prompt "your enhanced prompt here" \
-  --output "output_filename.png" \
+  --output "output.png" \
   --aspect_ratio "16:9"
 ```
 
-**Expected output:**
-```
-Image successfully generated and saved to output_filename.png
+**OpenAI GPT-image models:**
+```bash
+python3 "$SKILL_DIR/scripts/generate.py" \
+  --prompt "your enhanced prompt here" \
+  --output "output.png" \
+  --aspect_ratio "16:9" \
+  --model "gpt-image-1" \
+  --quality "high" \
+  --format "png"
 ```
 
-### Step 4: Report to user
+The `--provider` flag is auto-detected from the model name, but can be set explicitly:
+```bash
+  --provider openai   # or google
+```
 
-Tell the user the file path, the prompt used, and offer to refine if needed.
+### Step 5: Report to user
+
+Tell the user: file path, model used, prompt, token usage (OpenAI only), and offer to refine.
+
+---
 
 ## Examples
 
-### Example 1: Landscape image
-**User asks**: "Vẽ cho tôi một thành phố cyberpunk về đêm, tỷ lệ 16:9"
+### Example 1: OpenAI GPT-image landscape
+**User asks**: "astraler image gpt vẽ thành phố cyberpunk về đêm, 16:9"
 
-**What the skill does**:
-1. Enhances prompt with cinematic quality modifiers
-2. Runs script with `--aspect_ratio "16:9"`
-3. Reports saved file path to user
-
-**Command**:
 ```bash
 python3 "$SKILL_DIR/scripts/generate.py" \
   --prompt "a highly detailed cyberpunk city at night, neon lights reflecting on wet streets, flying cars, cinematic lighting, 4K, photorealistic" \
   --output "cyberpunk_city.png" \
-  --aspect_ratio "16:9"
+  --model "gpt-image-2" \
+  --aspect_ratio "16:9" \
+  --quality "high"
 ```
 
-### Example 2: Portrait / Avatar
-**User asks**: "Tạo ảnh chân dung phong cách anime"
+### Example 2: OpenAI GPT-image portrait
+**User asks**: "astraler openai tạo chân dung anime 9:16"
 
 ```bash
 python3 "$SKILL_DIR/scripts/generate.py" \
   --prompt "anime style portrait of a young woman with long black hair, soft lighting, detailed eyes, studio ghibli inspired" \
   --output "anime_portrait.png" \
-  --aspect_ratio "9:16"
+  --model "gpt-image-2" \
+  --aspect_ratio "9:16" \
+  --quality "medium"
 ```
 
-### Example 3: Choose specific model (Imagen 4)
-**User asks**: "Dùng Imagen 4 vẽ ảnh núi lúc hoàng hôn"
+### Example 3: OpenAI gpt-image-1-mini (faster/cheaper)
+**User asks**: "astraler chatgpt image vẽ logo minimalist"
+
+```bash
+python3 "$SKILL_DIR/scripts/generate.py" \
+  --prompt "minimalist modern logo, clean lines, geometric shapes, white background" \
+  --output "logo.png" \
+  --model "gpt-image-1-mini" \
+  --aspect_ratio "1:1" \
+  --quality "medium"
+```
+
+### Example 4: Google Imagen 4 (default path)
+**User asks**: "Astraler vẽ ảnh núi lúc hoàng hôn, Imagen 4"
 
 ```bash
 python3 "$SKILL_DIR/scripts/generate.py" \
@@ -111,31 +159,59 @@ python3 "$SKILL_DIR/scripts/generate.py" \
   --model "imagen-4.0-generate-001"
 ```
 
+---
+
+## Model Reference
+
+### OpenAI GPT-image models
+
+| Model | Quality | Speed | Notes |
+|-------|---------|-------|-------|
+| `gpt-image-2` | ⭐⭐⭐⭐⭐ | Medium | **Default**, latest generation ✅ |
+| `gpt-image-1.5` | ⭐⭐⭐⭐⭐ | Medium | Previous gen, high quality |
+| `gpt-image-1` | ⭐⭐⭐⭐ | Medium | Stable, widely supported |
+| `gpt-image-1-mini` | ⭐⭐⭐ | Fast | Cheaper, good for drafts |
+
+**Sizes for GPT-image:**
+- `1:1` → `1024x1024`
+- `16:9` → `1536x1024` (landscape)
+- `9:16` → `1024x1536` (portrait)
+
+**Quality options:** `low` | `medium` | `high` | `auto`  
+**Format options:** `png` | `jpeg` | `webp`  
+**Response:** Always returns base64-encoded image (no URL)
+
+### Google Gemini / Imagen models
+
+| Model | Quality | Notes |
+|-------|---------|-------|
+| `gemini-3-pro-image-preview` | ⭐⭐⭐⭐⭐ | Default, reliable |
+| `gemini-3.1-flash-image-preview` | ⭐⭐⭐⭐ | Faster |
+| `imagen-4.0-generate-001` | ⭐⭐⭐⭐⭐ | Highest quality (Imagen 4) |
+| `imagen-4.0-fast-generate-001` | ⭐⭐⭐⭐ | Imagen 4 Fast |
+
+---
+
 ## Limitations
 
-- Requires a valid `GEMINI_API_KEY` — free tier available at Google AI Studio
-- Image content must comply with Google's usage policies (no violence, explicit content)
-- Script requires Python 3.8+ (uses stdlib only, no pip install needed)
-- `gemini-2.0-flash-exp` may return text instead of image — use `gemini-3-pro-image-preview` (default) or `imagen-4.0-generate-001` for reliable image output
+- **OpenAI:** Requires `OPENAI_API_KEY`. GPT-image models always return base64 (no URL response).
+- **Google:** Requires `GEMINI_API_KEY`. Free tier at Google AI Studio.
+- Both providers: Content must comply with their respective usage policies.
+- Script requires Python 3.8+ (stdlib only — no `pip install` needed).
 
-## Configuration
+---
 
-After installation, edit the `.env` file in the skill directory:
+## Configuration (`.env` file)
 
 ```
-~/.claude/skills/astraler-generate-image/.env
+# Google Gemini / Imagen
+GEMINI_API_KEY=your_google_key_here
+
+# OpenAI GPT-image
+OPENAI_API_KEY=your_openai_key_here
+
+# Default model (used when --model is not specified)
+IMAGE_MODEL=gemini-3-pro-image-preview
 ```
 
-Available options:
-- `GEMINI_API_KEY`: Your Google AI Studio API key (required)
-- `IMAGE_MODEL`: Default model — `gemini-3-pro-image-preview` — **default**, reliable image output ✅
-- `gemini-3.1-flash-image-preview` — newer, faster variant ✅
-- `gemini-2.5-flash-image` — Gemini 2.5 Flash image model ✅
-- `imagen-4.0-generate-001` — Imagen 4, highest quality (uses `predict` endpoint) ✅
-- `imagen-4.0-fast-generate-001` — Imagen 4 Fast, quicker generation ✅
-- ~~`imagen-3.0-generate-002`~~ — **NOT available** via AI Studio API ❌
-
-## Additional Resources
-
-For detailed model specs and aspect ratio reference:
-- See [references/models.md](references/models.md) for available models and payloads
+See [references/models.md](references/models.md) for detailed model specs.
