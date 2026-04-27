@@ -1,8 +1,28 @@
 # Astraler Generate Image — Model Reference
 
-Detailed specs for each model the skill supports. The agent reads this only
-when a user asks something specific (pricing, endpoint shape, prompt style)
-that isn't in `SKILL.md`.
+Detailed specs for each model the skill supports, for both **generate** and
+**edit** modes. The agent reads this only when a user asks something specific
+(pricing, endpoint shape, prompt style, edit support) that isn't in `SKILL.md`.
+
+## Edit mode capability summary
+
+| Model | Generate | Edit (no mask) | Edit (with mask) | How |
+|---|---|---|---|---|
+| `gemini-3-pro-image-preview` | ✅ | ✅ multimodal | ❌ | text + `inlineData` image part in `:generateContent` |
+| `gemini-3.1-flash-image-preview` | ✅ | ✅ multimodal | ❌ | same as Gemini 3 Pro |
+| `imagen-4.0-generate-001` | ✅ | ❌ | ❌ | `:predict` accepts text only |
+| `imagen-4.0-fast-generate-001` | ✅ | ❌ | ❌ | same |
+| `gpt-image-1` | ✅ | ✅ | ✅ | `/v1/images/edits` multipart, mask optional |
+| `gpt-image-1.5` | ✅ | ✅ | ✅ | same |
+| `gpt-image-1-mini` | ✅ | ✅ | ✅ | same — keep prompts short |
+| `gpt-image-2` | ✅ | ✅ | ✅ | same — needs org verification |
+
+Free-form text-driven edits (restyle, scene change, add/remove element) work on
+both Gemini multimodal and OpenAI without a mask. Mask-based inpainting (precise
+spatial edit of a defined region) is OpenAI-only — `--mask` PNG transparent
+pixels mark the edit zone.
+
+
 
 ## Table of Contents
 
