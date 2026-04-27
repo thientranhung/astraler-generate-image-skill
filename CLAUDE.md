@@ -58,6 +58,17 @@ without checking with the user — it's intentional to avoid spamming.
 - **Input image limit**: 18 MB (`MAX_INPUT_BYTES`). Above this, fail before
   network. Caller agent should resize/compress upstream if needed.
 
+## Schema Uniformity Rule
+
+The JSON output is consumed by harness agents that should NOT have to branch on
+optional keys. **Every result key** (`size`, `quality`, `format`, `usage`,
+`mode`, `input_images`, `mask`, etc.) **must always be present** with `null` /
+`[]` defaults when not applicable to the current provider/mode. Use the
+`_build_result()` helper — its defaults block is the contract source of truth.
+Adding a new key to one provider? Add it to the helper's defaults too, even if
+it's `None`. Two PRs already shipped bugs from this exact omission (v1.1 MIME
+asymmetry, v1.2 missing `quality`/`format` in Google results).
+
 ## File Map
 
 - `SKILL.md` — trigger description + 7-component prompt enhancement framework
@@ -95,6 +106,13 @@ python3 scripts/generate.py \
 Verify: stdout last line has `"ok": true`, `mode: "generate"` or `"edit"`, file at `output_path` opens.
 Note: the file extension may differ from `--output` (e.g. `.jpg` instead of
 `.png`) if the model returned JPEG.
+
+**Cheapest reliable smoke pair (~30s total real-API):**
+1. **Generate** with `imagen-4.0-fast-generate-001` (~5s, returns PNG natively via `:predict`)
+2. **Edit** the result with `gemini-3-pro-image-preview` (~25s, multimodal `:generateContent`, returns JPEG → exercises the MIME extension rewrite)
+
+This pair covers both Google endpoints, both modes, the JSON contract, and the
+MIME-honoring path in one go. Use as the default post-refactor regression check.
 
 ## Workflow for Changes
 
