@@ -1,7 +1,7 @@
 {
   "name": "@astraler/generate-image-skill",
-  "version": "1.0.4",
-  "description": "Astraler image generation skill for Claude Code — generates high-quality images using Google Gemini / Imagen 3 API",
+  "version": "1.1.0",
+  "description": "Astraler image generation skill for agent harnesses (Claude Code, Antigravity, Obsidian Agent Client) — multi-provider (Google Gemini/Imagen 4 + OpenAI GPT-image), structured prompt enhancement, JSON output contract.",
   "scripts": {
     "test": "echo 'No tests yet'"
   },
@@ -19,9 +19,15 @@
     "google",
     "gemini",
     "imagen",
+    "imagen-4",
+    "openai",
+    "gpt-image",
+    "gpt-image-1",
     "image-generation",
     "ai-art",
-    "claude"
+    "claude",
+    "antigravity",
+    "obsidian-agent"
   ],
   "author": "Tran Thien",
   "license": "MIT",

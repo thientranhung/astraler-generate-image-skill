@@ -1,6 +1,6 @@
 # @astraler/generate-image-skill
 
-> Astraler's image generation skill for AI agents — generates high-quality images using Google Gemini / Imagen 4 API
+> Astraler's image generation skill for AI agent harnesses (Claude Code, Antigravity, Obsidian Agent Client) — multi-provider (Google Gemini/Imagen 4 + OpenAI GPT-image), structured prompt enhancement, JSON output contract.
 
 [![npm version](https://badge.fury.io/js/%40astraler%2Fgenerate-image-skill.svg)](https://www.npmjs.com/package/@astraler/generate-image-skill)
 

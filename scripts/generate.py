@@ -7,19 +7,33 @@ Supported providers:
   - OpenAI GPT-image models (OPENAI_API_KEY)
 
 Usage:
-  python3 generate.py --prompt "..." --output "out.png" [--model gpt-image-1] [--aspect_ratio 16:9] [--quality high] [--provider openai]
+  python3 generate.py --prompt "..." --output "out.png" \
+      [--model gpt-image-1] [--aspect_ratio 16:9] [--quality high] \
+      [--provider openai] [--enhanced_from "raw user prompt"] [--json]
+
+Designed to be called from agent harnesses (Obsidian Agent Client, Antigravity,
+Claude Code). The final stdout line is always a single-line JSON object
+describing the result, so callers can parse it deterministically.
 """
 
-import urllib.request
-import urllib.parse
-import json
-import base64
-import os
-import sys
-import argparse
+from __future__ import annotations
 
-# ─── Size mapping for aspect ratios ───────────────────────────────────────────
-# OpenAI GPT-image models support: 1024x1024, 1536x1024 (landscape), 1024x1536 (portrait), auto
+import argparse
+import base64
+import json
+import mimetypes
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from typing import List, NoReturn, Optional
+
+# ─── Constants ────────────────────────────────────────────────────────────────
+
+# OpenAI GPT-image models support: 1024x1024, 1536x1024, 1024x1536, auto
 OPENAI_SIZE_MAP = {
     "1:1":  "1024x1024",
     "16:9": "1536x1024",
@@ -29,248 +43,423 @@ OPENAI_SIZE_MAP = {
     "auto": "auto",
 }
 
+DEFAULT_MODEL = "gemini-3-pro-image-preview"
+
+# Network timeout (seconds) — image generation typically takes 5-30s; cap at 90s
+# to prevent the agent harness from hanging indefinitely on a stalled connection.
+HTTP_TIMEOUT = 90
+
+# Whitelist of characters allowed in a model name. Prevents URL path-injection
+# (e.g. "foo/../bar") since the model is interpolated into the API URL.
+_MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+# ─── Env / path resolution ────────────────────────────────────────────────────
+
+def candidate_env_paths(explicit: Optional[str]) -> List[str]:
+    """Return ordered list of .env paths to try.
+
+    Resolution order (first existing wins):
+      1. --env_file CLI flag (if given)
+      2. $ASTRALER_SKILL_DIR/.env  (set by harness)
+      3. <script_dir>/../.env       (skill root, normal install)
+      4. $HOME/.claude/skills/astraler-generate-image/.env
+      5. $HOME/.gemini/antigravity/skills/astraler-generate-image/.env
+      6. $HOME/.agents/skills/astraler-generate-image/.env
+      7. ./.env                     (project-level)
+    """
+    paths: List[str] = []
+    if explicit:
+        paths.append(explicit)
+
+    skill_dir_env = os.environ.get("ASTRALER_SKILL_DIR")
+    if skill_dir_env:
+        paths.append(os.path.join(skill_dir_env, ".env"))
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    paths.append(os.path.normpath(os.path.join(here, "..", ".env")))
+
+    home = os.path.expanduser("~")
+    paths.extend([
+        os.path.join(home, ".claude", "skills", "astraler-generate-image", ".env"),
+        os.path.join(home, ".gemini", "antigravity", "skills", "astraler-generate-image", ".env"),
+        os.path.join(home, ".agents", "skills", "astraler-generate-image", ".env"),
+        os.path.join(os.getcwd(), ".env"),
+    ])
+    return paths
+
+
+def _parse_env_line(line: str):
+    """Parse one .env line into (key, value) or return None.
+
+    Handles common shell-style .env conventions:
+      - Leading `export ` prefix (so users can `source` the file too)
+      - Quoted values: 'foo' or "foo"
+      - Inline comments after an UNQUOTED value: KEY=value  # note
+        (Comments inside quotes are preserved verbatim.)
+    """
+    line = line.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        return None
+    if line.startswith("export "):
+        line = line[len("export "):].lstrip()
+    key, val = line.split("=", 1)
+    key = key.strip()
+    val = val.strip()
+    if val.startswith(("'", '"')) and len(val) >= 2 and val[0] == val[-1]:
+        val = val[1:-1]
+    elif "#" in val:
+        val = val.split("#", 1)[0].rstrip()
+    return key, val
+
+
+def load_env(explicit: Optional[str] = None) -> Optional[str]:
+    """Load .env into os.environ; return path used (or None).
+
+    Values already set in os.environ are NOT overwritten — the harness's env
+    takes precedence over the .env file. Document this in SKILL.md.
+    """
+    for p in candidate_env_paths(explicit):
+        if p and os.path.isfile(p):
+            with open(p, "r", encoding="utf-8") as f:
+                for line in f:
+                    parsed = _parse_env_line(line)
+                    if parsed is None:
+                        continue
+                    key, val = parsed
+                    if key not in os.environ:
+                        os.environ[key] = val
+            return p
+    return None
+
+
 # ─── Helpers ──────────────────────────────────────────────────────────────────
-
-def load_env():
-    env_path = os.path.join(os.path.dirname(__file__), '..', '.env')
-    if os.path.exists(env_path):
-        with open(env_path, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#'):
-                    if '=' in line:
-                        key, val = line.split('=', 1)
-                        os.environ[key.strip()] = val.strip().strip("'\"")
-
 
 def detect_provider(model_name: str) -> str:
     """Auto-detect provider from model name."""
-    if model_name.startswith("gpt-image"):
+    if model_name.lower().startswith("gpt-image"):
         return "openai"
-    if model_name.startswith("dall-e"):
-        return "openai"
-    if model_name == "gpt-image-2":
-        return "openai"
-    return "google"  # gemini-* or imagen-*
+    return "google"
 
 
-def resolve_output_ext(output_file: str, output_format: str) -> str:
-    """Ensure output file has the correct extension."""
-    base, _ = os.path.splitext(output_file)
-    ext = output_format if output_format != "jpeg" else "jpg"
+def validate_model_name(model: str) -> None:
+    """Raise SystemExit if the model name contains characters unsafe for URL interpolation."""
+    if not _MODEL_NAME_RE.match(model):
+        # Not using fail() here because we don't have json_only/quiet context yet.
+        print(json.dumps({
+            "ok": False,
+            "error": f"Invalid model name {model!r}: must match {_MODEL_NAME_RE.pattern}",
+        }), file=sys.stdout)
+        sys.exit(1)
+
+
+def ext_for_mime(mime: Optional[str]) -> Optional[str]:
+    """Return file extension for a MIME type (no leading dot). Normalizes jpe/jpeg → jpg."""
+    if not mime:
+        return None
+    ext = mimetypes.guess_extension(mime.split(";")[0].strip())
+    if not ext:
+        return None
+    ext = ext.lstrip(".").lower()
+    return "jpg" if ext in ("jpe", "jpeg") else ext
+
+
+def replace_ext(path: str, ext: Optional[str]) -> str:
+    """Replace path's extension with `ext` (no leading dot). Returns unchanged if ext is None or already matches."""
+    if not ext:
+        return path
+    base, current = os.path.splitext(path)
+    if current.lstrip(".").lower() == ext.lower():
+        return path
     return f"{base}.{ext}"
+
+
+# ─── Output helpers ───────────────────────────────────────────────────────────
+
+def emit(result: dict, *, json_only: bool, quiet: bool) -> None:
+    """Print human-readable summary (unless quiet) and a final JSON line."""
+    if not quiet and not json_only:
+        ok = result.get("ok", False)
+        marker = "✅" if ok else "❌"
+        print(f"{marker} {'Image saved' if ok else 'Failed'} → {result.get('output_path', '-')}")
+        meta_bits = [
+            f"provider={result.get('provider')}",
+            f"model={result.get('model')}",
+            f"size={result.get('size') or result.get('aspect_ratio')}",
+        ]
+        if result.get("usage"):
+            u = result["usage"]
+            meta_bits.append(
+                f"tokens={u.get('total_tokens', '?')} "
+                f"({u.get('input_tokens','?')}in/{u.get('output_tokens','?')}out)"
+            )
+        print("   " + "  |  ".join(meta_bits))
+        if result.get("enhanced_from"):
+            print(f"   raw_prompt: {result['enhanced_from'][:100]}")
+    # Always emit a single JSON line as the LAST stdout line so callers can parse.
+    print(json.dumps(result, ensure_ascii=False))
+
+
+def fail(msg: str, *, json_only: bool, quiet: bool, **extra) -> NoReturn:
+    result = {"ok": False, "error": msg, **extra}
+    emit(result, json_only=json_only, quiet=quiet)
+    sys.exit(1)
+
+
+# ─── HTTP helper ──────────────────────────────────────────────────────────────
+
+def _redact(text: str) -> str:
+    """Strip API keys / bearer tokens from error messages before they hit JSON output."""
+    # Google AI Studio key style: AIza... (39 chars). Bearer tokens / OpenAI sk-...
+    text = re.sub(r"AIza[0-9A-Za-z_-]{20,}", "AIza***REDACTED***", text)
+    text = re.sub(r"sk-[A-Za-z0-9_-]{16,}", "sk-***REDACTED***", text)
+    text = re.sub(r"[?&]key=[^&\s\"']+", "?key=***REDACTED***", text)
+    return text
+
+
+def post_json(url: str, payload: dict, *, headers: Optional[dict] = None,
+              provider: str, model: str, json_only: bool, quiet: bool) -> dict:
+    """POST JSON payload, return parsed response. Calls fail() (which exits) on any error."""
+    body = json.dumps(payload).encode("utf-8")
+    req_headers = {"Content-Type": "application/json", **(headers or {})}
+    req = urllib.request.Request(url, data=body, headers=req_headers)
+    try:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="replace")
+        fail(f"{provider.title()} HTTP {e.code}: {_redact(err_body)}",
+             json_only=json_only, quiet=quiet, provider=provider, model=model)
+    except Exception as e:  # noqa: BLE001 — any failure surfaces to JSON
+        fail(f"{provider.title()} request failed: {_redact(str(e))}",
+             json_only=json_only, quiet=quiet, provider=provider, model=model)
 
 
 # ─── OpenAI provider ──────────────────────────────────────────────────────────
 
-def generate_openai(prompt: str, output_file: str, model_name: str,
-                    aspect_ratio: str, quality: str, output_format: str):
+def generate_openai(args, *, json_only: bool, quiet: bool) -> dict:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        print("Error: OPENAI_API_KEY not set. Configure it in .env or export it.", file=sys.stderr)
-        print("  Get a key at: https://platform.openai.com/api-keys", file=sys.stderr)
-        sys.exit(1)
+        fail(
+            "OPENAI_API_KEY not set. Get a key at https://platform.openai.com/api-keys "
+            "and configure it in .env or ASTRALER_SKILL_DIR/.env.",
+            json_only=json_only, quiet=quiet,
+            provider="openai", model=args.model,
+        )
 
-    size = OPENAI_SIZE_MAP.get(aspect_ratio, "auto")
+    size = OPENAI_SIZE_MAP.get(args.aspect_ratio, "auto")
     payload = {
-        "model": model_name,
-        "prompt": prompt,
+        "model": args.model,
+        "prompt": args.prompt,
         "n": 1,
         "size": size,
-        "quality": quality,
-        "output_format": output_format,
+        "quality": args.quality,
+        "output_format": args.format,
     }
+    if args.background and args.background != "auto":
+        payload["background"] = args.background
 
-    url = "https://api.openai.com/v1/images/generations"
-    data = json.dumps(payload).encode("utf-8")
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}",
+    started = time.time()
+    result = post_json(
+        "https://api.openai.com/v1/images/generations",
+        payload,
+        headers={"Authorization": f"Bearer {api_key}"},
+        provider="openai", model=args.model,
+        json_only=json_only, quiet=quiet,
+    )
+
+    images = result.get("data") or []
+    if not images:
+        fail("OpenAI returned no images.",
+             json_only=json_only, quiet=quiet,
+             provider="openai", model=args.model, raw=result)
+
+    b64_image = images[0].get("b64_json")
+    if b64_image:
+        image_data = base64.b64decode(b64_image)
+    else:
+        img_url = images[0].get("url")
+        if not img_url:
+            fail("OpenAI returned no image bytes or URL.",
+                 json_only=json_only, quiet=quiet,
+                 provider="openai", model=args.model)
+        with urllib.request.urlopen(img_url, timeout=HTTP_TIMEOUT) as r:
+            image_data = r.read()
+
+    output_file = replace_ext(args.output, "jpg" if args.format == "jpeg" else args.format)
+    with open(output_file, "wb") as f:
+        f.write(image_data)
+
+    return {
+        "ok": True,
+        "provider": "openai",
+        "model": args.model,
+        "output_path": os.path.abspath(output_file),
+        "size": size,
+        "aspect_ratio": args.aspect_ratio,
+        "quality": args.quality,
+        "format": args.format,
+        "mime": f"image/{args.format}",
+        "bytes_size": len(image_data),
+        "prompt": args.prompt,
+        "enhanced_from": args.enhanced_from,
+        "usage": result.get("usage"),
+        "duration_ms": int((time.time() - started) * 1000),
     }
-
-    req = urllib.request.Request(url, data=data, headers=headers)
-
-    try:
-        with urllib.request.urlopen(req) as response:
-            result = json.loads(response.read().decode("utf-8"))
-
-        images = result.get("data", [])
-        if not images:
-            print("Error: No images returned from OpenAI.", file=sys.stderr)
-            print(json.dumps(result, indent=2), file=sys.stderr)
-            sys.exit(1)
-
-        b64_image = images[0].get("b64_json")
-        if not b64_image:
-            # DALL-E 2/3 may return URL instead
-            img_url = images[0].get("url")
-            if img_url:
-                with urllib.request.urlopen(img_url) as r:
-                    image_data = r.read()
-            else:
-                print("Error: No image bytes or URL returned.", file=sys.stderr)
-                sys.exit(1)
-        else:
-            image_data = base64.b64decode(b64_image)
-
-        output_file = resolve_output_ext(output_file, output_format)
-        with open(output_file, "wb") as f:
-            f.write(image_data)
-
-        usage = result.get("usage", {})
-        print(f"✅ Image saved → {output_file}")
-        print(f"   Model : {model_name}  |  Size: {size}  |  Quality: {quality}")
-        if usage:
-            print(f"   Tokens: {usage.get('total_tokens', '?')} total "
-                  f"({usage.get('input_tokens','?')} in / {usage.get('output_tokens','?')} out)")
-
-    except urllib.error.HTTPError as e:
-        error_msg = e.read().decode("utf-8")
-        print(f"HTTP Error {e.code}: {error_msg}", file=sys.stderr)
-        sys.exit(1)
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
 
 
 # ─── Google Gemini / Imagen provider ─────────────────────────────────────────
 
-def generate_google(prompt: str, output_file: str, model_name: str, aspect_ratio: str):
+def generate_google(args, *, json_only: bool, quiet: bool) -> dict:
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        print("Error: GEMINI_API_KEY not set.", file=sys.stderr)
-        print("  Get a free key at: https://aistudio.google.com/app/apikey", file=sys.stderr)
-        sys.exit(1)
+        fail(
+            "GEMINI_API_KEY not set. Get a free key at "
+            "https://aistudio.google.com/app/apikey and configure it in .env.",
+            json_only=json_only, quiet=quiet,
+            provider="google", model=args.model,
+        )
 
-    encoded_model = urllib.parse.quote(model_name)
-    is_gemini_model = model_name.startswith("gemini")
+    # safe='' — don't preserve any path separators in the model name.
+    encoded_model = urllib.parse.quote(args.model, safe="")
+    is_gemini = args.model.startswith("gemini")
+    method = "generateContent" if is_gemini else "predict"
+    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+           f"{encoded_model}:{method}")
 
-    if is_gemini_model:
-        url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-               f"{encoded_model}:generateContent?key={api_key}")
+    if is_gemini:
+        # Gemini image-preview models read aspect ratio from prompt text.
         payload = {
             "contents": [
-                {"parts": [{"text": prompt + f" (Aspect ratio: {aspect_ratio})"}]}
+                {"parts": [{"text": f"{args.prompt} (Aspect ratio: {args.aspect_ratio})"}]}
             ]
         }
     else:
-        # Imagen models use :predict endpoint
-        url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-               f"{encoded_model}:predict?key={api_key}")
+        # Imagen models use :predict with a different payload shape.
         payload = {
-            "instances": [{"prompt": prompt}],
+            "instances": [{"prompt": args.prompt}],
             "parameters": {
                 "sampleCount": 1,
-                "aspectRatio": aspect_ratio,
+                "aspectRatio": args.aspect_ratio,
                 "outputOptions": {"mimeType": "image/png"},
             },
         }
 
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=data, headers={"Content-Type": "application/json"}
+    started = time.time()
+    # Pass API key in header, not URL. Keeps it out of error messages, server
+    # logs, and HTTP referrers.
+    result = post_json(
+        url, payload,
+        headers={"x-goog-api-key": api_key},
+        provider="google", model=args.model,
+        json_only=json_only, quiet=quiet,
     )
 
-    try:
-        with urllib.request.urlopen(req) as response:
-            result = json.loads(response.read().decode("utf-8"))
-
-        b64_image = None
-        if is_gemini_model:
-            candidates = result.get("candidates", [])
-            if not candidates:
-                print("Error: No candidates returned.", file=sys.stderr)
-                print(json.dumps(result, indent=2), file=sys.stderr)
-                sys.exit(1)
-            parts = candidates[0].get("content", {}).get("parts", [])
-            if not parts or "inlineData" not in parts[0]:
-                print("Error: No inlineData returned.", file=sys.stderr)
-                print(json.dumps(result, indent=2), file=sys.stderr)
-                sys.exit(1)
-            b64_image = parts[0]["inlineData"].get("data")
-        else:
-            predictions = result.get("predictions", [])
-            if not predictions:
-                print("Error: No predictions returned.", file=sys.stderr)
-                print(json.dumps(result, indent=2), file=sys.stderr)
-                sys.exit(1)
+    b64_image = None
+    response_mime = None
+    if is_gemini:
+        candidates = result.get("candidates") or []
+        if candidates:
+            for part in candidates[0].get("content", {}).get("parts", []):
+                if "inlineData" in part:
+                    b64_image = part["inlineData"].get("data")
+                    response_mime = part["inlineData"].get("mimeType")
+                    break
+    else:
+        predictions = result.get("predictions") or []
+        if predictions:
             b64_image = (predictions[0].get("bytesBase64Encoded")
                          or predictions[0].get("bytesBase64"))
+            response_mime = predictions[0].get("mimeType") or "image/png"
 
-        if not b64_image:
-            print("Error: No image bytes returned.", file=sys.stderr)
-            sys.exit(1)
+    if not b64_image:
+        fail("Google returned no image bytes.",
+             json_only=json_only, quiet=quiet,
+             provider="google", model=args.model, raw=result)
 
-        image_data = base64.b64decode(b64_image)
-        with open(output_file, "wb") as f:
-            f.write(image_data)
+    image_data = base64.b64decode(b64_image)
 
-        print(f"✅ Image saved → {output_file}")
-        print(f"   Model : {model_name}  |  Aspect ratio: {aspect_ratio}")
+    # Honor the actual MIME from the API response — Gemini 3 returns JPEG inline
+    # data even when the user asks for a .png file. Rewrite the extension so the
+    # file on disk matches its bytes.
+    final_mime = response_mime or "image/png"
+    final_path = replace_ext(args.output, ext_for_mime(final_mime))
 
-    except urllib.error.HTTPError as e:
-        error_msg = e.read().decode("utf-8")
-        print(f"HTTP Error {e.code}: {error_msg}", file=sys.stderr)
-        sys.exit(1)
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+    with open(final_path, "wb") as f:
+        f.write(image_data)
+
+    return {
+        "ok": True,
+        "provider": "google",
+        "model": args.model,
+        "output_path": os.path.abspath(final_path),
+        "aspect_ratio": args.aspect_ratio,
+        "size": None,
+        "mime": final_mime,
+        "bytes_size": len(image_data),
+        "prompt": args.prompt,
+        "enhanced_from": args.enhanced_from,
+        "usage": None,
+        "duration_ms": int((time.time() - started) * 1000),
+    }
 
 
 # ─── Main entry point ─────────────────────────────────────────────────────────
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Astraler Generate Image — Google Gemini/Imagen & OpenAI GPT-image"
+        description="Astraler Generate Image — Google Gemini/Imagen & OpenAI GPT-image",
     )
-    parser.add_argument("--prompt",       required=True, help="Text prompt for the image")
-    parser.add_argument("--output",       required=True, help="Output filename (e.g. out.png)")
-    parser.add_argument("--model",        help="Model name (overrides .env IMAGE_MODEL)")
+    parser.add_argument("--prompt", required=True, help="Final (enhanced) text prompt for the image")
+    parser.add_argument("--output", required=True, help="Output filename (e.g. out.png)")
+    parser.add_argument("--model", help="Model name (overrides .env IMAGE_MODEL)")
     parser.add_argument("--aspect_ratio", default="1:1",
-                        help="Aspect ratio: 1:1 | 16:9 | 9:16 | 4:3 | 3:4 (Google) or auto (OpenAI)")
-    parser.add_argument("--provider",     choices=["google", "openai", "auto"], default="auto",
-                        help="Provider: google | openai | auto (auto-detect from model name)")
-    parser.add_argument("--quality",      default="auto",
-                        choices=["auto", "low", "medium", "high", "standard", "hd"],
-                        help="Image quality (OpenAI GPT-image: low/medium/high; DALL-E 3: hd/standard)")
-    parser.add_argument("--format",       default="png",
-                        choices=["png", "jpeg", "webp"],
-                        help="Output format for OpenAI GPT-image models (default: png)")
+                        help="1:1 | 16:9 | 9:16 | 4:3 | 3:4 (Google) or auto (OpenAI)")
+    parser.add_argument("--provider", choices=["google", "openai", "auto"], default="auto",
+                        help="Provider hint; auto = infer from model name")
+    parser.add_argument("--quality", default="auto",
+                        choices=["auto", "low", "medium", "high"],
+                        help="OpenAI GPT-image quality (low | medium | high | auto)")
+    parser.add_argument("--format", default="png", choices=["png", "jpeg", "webp"],
+                        help="Output format for OpenAI GPT-image (default: png)")
+    parser.add_argument("--background", default="auto",
+                        choices=["auto", "transparent", "opaque"],
+                        help="OpenAI GPT-image background (transparent requires png/webp)")
+    parser.add_argument("--enhanced_from",
+                        help="Original raw user prompt before enhancement (for traceability)")
+    parser.add_argument("--env_file", help="Explicit path to .env file")
+    parser.add_argument("--json", action="store_true",
+                        help="Emit only the final JSON line; suppress decorative output")
+    parser.add_argument("--quiet", action="store_true",
+                        help="Suppress decorative output (still emits JSON line)")
 
     args = parser.parse_args()
-    load_env()
 
-    # Resolve model
-    # Resolve model — default depends on provider hint in trigger
-    model_name = args.model or os.environ.get("IMAGE_MODEL", "gemini-3-pro-image-preview")
+    env_used = load_env(args.env_file)
 
-    # Resolve provider
-    provider = args.provider
-    if provider == "auto":
-        provider = detect_provider(model_name)
+    args.model = args.model or os.environ.get("IMAGE_MODEL", DEFAULT_MODEL)
+    validate_model_name(args.model)
+    provider = args.provider if args.provider != "auto" else detect_provider(args.model)
 
-    print(f"🎨 Astraler Generate Image")
-    print(f"   Provider : {provider.upper()}")
-    print(f"   Model    : {model_name}")
-    print(f"   Prompt   : {args.prompt[:80]}{'...' if len(args.prompt) > 80 else ''}")
-    print()
+    json_only = args.json
+    quiet = args.quiet or json_only
+
+    if not quiet:
+        print("🎨 Astraler Generate Image")
+        print(f"   Provider : {provider.upper()}")
+        print(f"   Model    : {args.model}")
+        if env_used:
+            print(f"   Env file : {env_used}")
+        prompt_preview = args.prompt[:80] + ("..." if len(args.prompt) > 80 else "")
+        print(f"   Prompt   : {prompt_preview}")
+        print()
 
     if provider == "openai":
-        generate_openai(
-            prompt=args.prompt,
-            output_file=args.output,
-            model_name=model_name,
-            aspect_ratio=args.aspect_ratio,
-            quality=args.quality,
-            output_format=args.format,
-        )
+        result = generate_openai(args, json_only=json_only, quiet=quiet)
     else:
-        generate_google(
-            prompt=args.prompt,
-            output_file=args.output,
-            model_name=model_name,
-            aspect_ratio=args.aspect_ratio,
-        )
+        result = generate_google(args, json_only=json_only, quiet=quiet)
+
+    emit(result, json_only=json_only, quiet=quiet)
 
 
 if __name__ == "__main__":
