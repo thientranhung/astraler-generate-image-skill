@@ -34,15 +34,21 @@ npx skills remove astraler-generate-image
 
 ## Configuration
 
-After installation, set at least one API key (Gemini OR OpenAI — both work, you can configure both):
+After installation, copy the bundled template `env.example` to `.env` and fill in at least one API key (Gemini OR OpenAI — both work, you can configure both):
 
 ```bash
 # If installed globally
-nano ~/.agents/skills/astraler-generate-image/.env
+cd ~/.agents/skills/astraler-generate-image
+cp env.example .env
+nano .env
 
 # If installed at project level
-nano .agents/skills/astraler-generate-image/.env
+cd .agents/skills/astraler-generate-image
+cp env.example .env
+nano .env
 ```
+
+The template covers both providers:
 
 ```dotenv
 # Google Gemini / Imagen — free tier available
@@ -54,6 +60,8 @@ OPENAI_API_KEY=your_openai_key_here
 # Default model (used when --model is not specified)
 IMAGE_MODEL=gemini-3-pro-image-preview
 ```
+
+> **Note:** the template file is named `env.example` (no leading dot) because the skills CLI strips dotfiles when extracting the package. Your live config file should still be named `.env` — that's what the script auto-discovers.
 
 **Get API keys:**
 - Google (free tier): https://aistudio.google.com/app/apikey

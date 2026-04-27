@@ -77,7 +77,9 @@ asymmetry, v1.2 missing `quality`/`format` in Google results).
 - `scripts/generate.py` — the actual CLI. Stdlib only. ~400 lines.
 - `references/models.md` — detailed model specs, endpoints, payload formats.
   Read by the agent only when the user asks specifics.
-- `.env` (gitignored) / `.env.example` — API keys. The script auto-discovers
+- `.env` (gitignored) / `env.example` — API keys (note: shipped name has no
+  leading dot because skills CLI strips dotfiles when extracting the tarball).
+  The script auto-discovers
   `.env` across 7 fallback paths (see `candidate_env_paths` in
   `scripts/generate.py`); harness env vars take precedence over the file.
 - `package.json` — for `skills` CLI metadata, NOT npm publish.
