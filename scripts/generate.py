@@ -70,14 +70,10 @@ _MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 # making the network call.
 MAX_INPUT_BYTES = 18 * 1024 * 1024  # 18 MB
 
-# Map common image extensions to MIME types we send to the APIs.
-_IMAGE_MIME_BY_EXT = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".webp": "image/webp",
-    ".gif": "image/gif",
-}
+# Image MIMEs both Gemini and OpenAI accept as input. Gates what `load_image`
+# will pass through — `mimetypes.guess_type` may resolve other formats (heic,
+# avif) that the APIs don't accept, so we explicitly allow only this set.
+_SUPPORTED_INPUT_MIMES = frozenset({"image/png", "image/jpeg", "image/webp", "image/gif"})
 
 
 # ─── Env / path resolution ────────────────────────────────────────────────────
@@ -204,8 +200,9 @@ def load_image(path: str) -> Tuple[bytes, str]:
     """Read an image file and return (raw_bytes, mime_type).
 
     Raises ValueError on missing file, unsupported format, or oversize input.
-    Format is inferred from the file extension; we don't sniff magic bytes
-    because both target APIs accept the MIME we send and validate server-side.
+    Format is inferred from the file extension via `mimetypes.guess_type`; we
+    don't sniff magic bytes because both target APIs accept the MIME we send
+    and validate server-side.
     """
     if not os.path.isfile(path):
         raise ValueError(f"input image not found: {path}")
@@ -215,15 +212,42 @@ def load_image(path: str) -> Tuple[bytes, str]:
             f"input image is {size:,} bytes; max is {MAX_INPUT_BYTES:,} "
             f"(~{MAX_INPUT_BYTES // (1024 * 1024)} MB)"
         )
-    ext = os.path.splitext(path)[1].lower()
-    mime = _IMAGE_MIME_BY_EXT.get(ext)
-    if not mime:
+    mime, _ = mimetypes.guess_type(path)
+    if mime not in _SUPPORTED_INPUT_MIMES:
+        ext = os.path.splitext(path)[1].lower()
         raise ValueError(
             f"unsupported input image extension {ext!r}; "
-            f"supported: {', '.join(sorted(_IMAGE_MIME_BY_EXT))}"
+            f"supported MIME types: {', '.join(sorted(_SUPPORTED_INPUT_MIMES))}"
         )
     with open(path, "rb") as f:
         return f.read(), mime
+
+
+def _extract_gemini_inline(result: dict) -> Tuple[Optional[str], Optional[str]]:
+    """Extract (b64_image, mime_type) from a Gemini :generateContent response.
+
+    Returns (None, None) if no inlineData part is present (e.g. model returned
+    a text-only refusal, or an unexpected response shape).
+    """
+    for cand in result.get("candidates") or []:
+        for part in cand.get("content", {}).get("parts", []):
+            inline = part.get("inlineData")
+            if inline:
+                return inline.get("data"), inline.get("mimeType")
+    return None, None
+
+
+def _decode_and_write(b64: str, output: str, ext: Optional[str]) -> Tuple[str, bytes]:
+    """Decode a base64 image and write it to `output`, rewriting extension to `ext`.
+
+    Returns (final_path_on_disk, decoded_bytes). When ext is None or matches
+    the requested extension, the path is unchanged.
+    """
+    image_data = base64.b64decode(b64)
+    final_path = replace_ext(output, ext)
+    with open(final_path, "wb") as f:
+        f.write(image_data)
+    return final_path, image_data
 
 
 def _multipart_encode(fields: Dict[str, str],
@@ -253,6 +277,36 @@ def _multipart_encode(fields: Dict[str, str],
 
 
 # ─── Output helpers ───────────────────────────────────────────────────────────
+
+def _build_result(args, *, mode: str, provider: str, output_path: str,
+                  mime: str, bytes_size: int, started: float, **extras) -> dict:
+    """Build the success-result dict with the uniform fields callers expect.
+
+    Provider-specific fields (quality, format, size, usage) are passed via
+    **extras to override defaults. Keeps the JSON contract symmetric across
+    generate/edit and across providers — callers don't have to branch on
+    optional keys.
+    """
+    return {
+        "ok": True,
+        "mode": mode,
+        "provider": provider,
+        "model": args.model,
+        "output_path": os.path.abspath(output_path),
+        "aspect_ratio": args.aspect_ratio,
+        "mime": mime,
+        "bytes_size": bytes_size,
+        "prompt": args.prompt,
+        "enhanced_from": args.enhanced_from,
+        "input_images": [os.path.abspath(args.input_image)] if args.input_image else [],
+        "mask": os.path.abspath(args.mask) if args.mask else None,
+        "duration_ms": int((time.time() - started) * 1000),
+        # Defaults below — provider-specific callers override via **extras.
+        "size": None,
+        "usage": None,
+        **extras,
+    }
+
 
 def emit(result: dict, *, json_only: bool, quiet: bool) -> None:
     """Print human-readable summary (unless quiet) and a final JSON line."""
@@ -372,10 +426,13 @@ def generate_openai(args, *, json_only: bool, quiet: bool) -> dict:
              json_only=json_only, quiet=quiet,
              provider="openai", model=args.model, raw=result)
 
+    output_ext = "jpg" if args.format == "jpeg" else args.format
     b64_image = images[0].get("b64_json")
     if b64_image:
-        image_data = base64.b64decode(b64_image)
+        output_file, image_data = _decode_and_write(b64_image, args.output, output_ext)
     else:
+        # /v1/images/generations may return a URL when b64_json isn't requested;
+        # /v1/images/edits never does, so this branch is generations-only.
         img_url = images[0].get("url")
         if not img_url:
             fail("OpenAI returned no image bytes or URL.",
@@ -383,30 +440,19 @@ def generate_openai(args, *, json_only: bool, quiet: bool) -> dict:
                  provider="openai", model=args.model)
         with urllib.request.urlopen(img_url, timeout=HTTP_TIMEOUT) as r:
             image_data = r.read()
+        output_file = replace_ext(args.output, output_ext)
+        with open(output_file, "wb") as f:
+            f.write(image_data)
 
-    output_file = replace_ext(args.output, "jpg" if args.format == "jpeg" else args.format)
-    with open(output_file, "wb") as f:
-        f.write(image_data)
-
-    return {
-        "ok": True,
-        "mode": "generate",
-        "provider": "openai",
-        "model": args.model,
-        "output_path": os.path.abspath(output_file),
-        "size": size,
-        "aspect_ratio": args.aspect_ratio,
-        "quality": args.quality,
-        "format": args.format,
-        "mime": f"image/{args.format}",
-        "bytes_size": len(image_data),
-        "prompt": args.prompt,
-        "enhanced_from": args.enhanced_from,
-        "input_images": [],
-        "mask": None,
-        "usage": result.get("usage"),
-        "duration_ms": int((time.time() - started) * 1000),
-    }
+    return _build_result(
+        args, mode="generate", provider="openai",
+        output_path=output_file,
+        mime=f"image/{args.format}",
+        bytes_size=len(image_data),
+        started=started,
+        size=size, quality=args.quality, format=args.format,
+        usage=result.get("usage"),
+    )
 
 
 # ─── Google Gemini / Imagen provider ─────────────────────────────────────────
@@ -456,18 +502,11 @@ def generate_google(args, *, json_only: bool, quiet: bool) -> dict:
         json_only=json_only, quiet=quiet,
     )
 
-    b64_image = None
-    response_mime = None
     if is_gemini:
-        candidates = result.get("candidates") or []
-        if candidates:
-            for part in candidates[0].get("content", {}).get("parts", []):
-                if "inlineData" in part:
-                    b64_image = part["inlineData"].get("data")
-                    response_mime = part["inlineData"].get("mimeType")
-                    break
+        b64_image, response_mime = _extract_gemini_inline(result)
     else:
         predictions = result.get("predictions") or []
+        b64_image = response_mime = None
         if predictions:
             b64_image = (predictions[0].get("bytesBase64Encoded")
                          or predictions[0].get("bytesBase64"))
@@ -478,34 +517,19 @@ def generate_google(args, *, json_only: bool, quiet: bool) -> dict:
              json_only=json_only, quiet=quiet,
              provider="google", model=args.model, raw=result)
 
-    image_data = base64.b64decode(b64_image)
-
     # Honor the actual MIME from the API response — Gemini 3 returns JPEG inline
     # data even when the user asks for a .png file. Rewrite the extension so the
     # file on disk matches its bytes.
     final_mime = response_mime or "image/png"
-    final_path = replace_ext(args.output, ext_for_mime(final_mime))
+    final_path, image_data = _decode_and_write(b64_image, args.output, ext_for_mime(final_mime))
 
-    with open(final_path, "wb") as f:
-        f.write(image_data)
-
-    return {
-        "ok": True,
-        "mode": "generate",
-        "provider": "google",
-        "model": args.model,
-        "output_path": os.path.abspath(final_path),
-        "aspect_ratio": args.aspect_ratio,
-        "size": None,
-        "mime": final_mime,
-        "bytes_size": len(image_data),
-        "prompt": args.prompt,
-        "enhanced_from": args.enhanced_from,
-        "input_images": [],
-        "mask": None,
-        "usage": None,
-        "duration_ms": int((time.time() - started) * 1000),
-    }
+    return _build_result(
+        args, mode="generate", provider="google",
+        output_path=final_path,
+        mime=final_mime,
+        bytes_size=len(image_data),
+        started=started,
+    )
 
 
 # ─── Edit mode — Google Gemini multimodal ────────────────────────────────────
@@ -539,8 +563,8 @@ def edit_google(args, *, json_only: bool, quiet: bool) -> dict:
     url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
            f"{encoded_model}:generateContent")
 
-    # Multimodal input: text instruction + image. Gemini interprets the
-    # combination as "apply this instruction to this image".
+    # Order matters in the parts array: text first, then inlineData. Gemini's
+    # documented edit-prompt convention treats this as "apply text to image".
     payload = {
         "contents": [{
             "parts": [
@@ -561,46 +585,23 @@ def edit_google(args, *, json_only: bool, quiet: bool) -> dict:
         json_only=json_only, quiet=quiet,
     )
 
-    b64_image = None
-    response_mime = None
-    candidates = result.get("candidates") or []
-    if candidates:
-        for part in candidates[0].get("content", {}).get("parts", []):
-            if "inlineData" in part:
-                b64_image = part["inlineData"].get("data")
-                response_mime = part["inlineData"].get("mimeType")
-                break
-
+    b64_image, response_mime = _extract_gemini_inline(result)
     if not b64_image:
         fail("Google returned no image bytes (model may have refused or "
              "returned only text — check input image and prompt).",
              json_only=json_only, quiet=quiet,
              provider="google", model=args.model, raw=result)
 
-    image_data = base64.b64decode(b64_image)
     final_mime = response_mime or "image/png"
-    final_path = replace_ext(args.output, ext_for_mime(final_mime))
+    final_path, image_data = _decode_and_write(b64_image, args.output, ext_for_mime(final_mime))
 
-    with open(final_path, "wb") as f:
-        f.write(image_data)
-
-    return {
-        "ok": True,
-        "mode": "edit",
-        "provider": "google",
-        "model": args.model,
-        "output_path": os.path.abspath(final_path),
-        "aspect_ratio": args.aspect_ratio,
-        "size": None,
-        "mime": final_mime,
-        "bytes_size": len(image_data),
-        "prompt": args.prompt,
-        "enhanced_from": args.enhanced_from,
-        "input_images": [os.path.abspath(args.input_image)],
-        "mask": None,
-        "usage": None,
-        "duration_ms": int((time.time() - started) * 1000),
-    }
+    return _build_result(
+        args, mode="edit", provider="google",
+        output_path=final_path,
+        mime=final_mime,
+        bytes_size=len(image_data),
+        started=started,
+    )
 
 
 # ─── Edit mode — OpenAI /v1/images/edits ─────────────────────────────────────
@@ -670,31 +671,19 @@ def edit_openai(args, *, json_only: bool, quiet: bool) -> dict:
         fail("OpenAI edit returned no image bytes (b64_json missing).",
              json_only=json_only, quiet=quiet,
              provider="openai", model=args.model)
-    image_data = base64.b64decode(b64_image)
 
-    output_file = replace_ext(args.output, "jpg" if args.format == "jpeg" else args.format)
-    with open(output_file, "wb") as f:
-        f.write(image_data)
+    output_ext = "jpg" if args.format == "jpeg" else args.format
+    output_file, image_data = _decode_and_write(b64_image, args.output, output_ext)
 
-    return {
-        "ok": True,
-        "mode": "edit",
-        "provider": "openai",
-        "model": args.model,
-        "output_path": os.path.abspath(output_file),
-        "size": size,
-        "aspect_ratio": args.aspect_ratio,
-        "quality": args.quality,
-        "format": args.format,
-        "mime": f"image/{args.format}",
-        "bytes_size": len(image_data),
-        "prompt": args.prompt,
-        "enhanced_from": args.enhanced_from,
-        "input_images": [os.path.abspath(args.input_image)],
-        "mask": os.path.abspath(args.mask) if args.mask else None,
-        "usage": result.get("usage"),
-        "duration_ms": int((time.time() - started) * 1000),
-    }
+    return _build_result(
+        args, mode="edit", provider="openai",
+        output_path=output_file,
+        mime=f"image/{args.format}",
+        bytes_size=len(image_data),
+        started=started,
+        size=size, quality=args.quality, format=args.format,
+        usage=result.get("usage"),
+    )
 
 
 # ─── Main entry point ─────────────────────────────────────────────────────────
@@ -746,15 +735,20 @@ def main() -> None:
              json_only=args.json, quiet=args.quiet or args.json,
              provider="-", model=args.model)
 
-    # If a mask is given, OpenAI is the only provider that supports it.
-    if args.mask and args.provider == "google":
-        fail("--mask is OpenAI-only (Gemini multimodal does not accept inpainting masks).",
-             json_only=args.json, quiet=args.quiet or args.json,
-             provider="google", model=args.model)
-
     provider = args.provider if args.provider != "auto" else detect_provider(args.model)
-    if args.mask:
-        provider = "openai"
+
+    # Mask is OpenAI-only. Reject incompatible combinations clearly instead of
+    # silently overriding the provider — if the model is a Gemini one, OpenAI
+    # would reject it server-side with an opaque 400. Caller must use a GPT-image
+    # model when supplying a mask.
+    if args.mask and provider != "openai":
+        fail(
+            "--mask is OpenAI-only (Gemini multimodal does not accept inpainting masks). "
+            f"Got provider={provider!r}, model={args.model!r}. "
+            "Use a gpt-image-* model (e.g. --model gpt-image-1) when supplying --mask.",
+            json_only=args.json, quiet=args.quiet or args.json,
+            provider=provider, model=args.model,
+        )
 
     json_only = args.json
     quiet = args.quiet or json_only
