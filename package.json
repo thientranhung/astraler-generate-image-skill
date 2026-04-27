@@ -1,6 +1,6 @@
 {
   "name": "@astraler/generate-image-skill",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": true,
   "description": "Astraler image generation AND editing skill for agent harnesses (Claude Code, Antigravity, Obsidian Agent Client) — multi-provider (Google Gemini/Imagen 4 + OpenAI GPT-image), structured prompt enhancement (7-component for generate, Preserve/Change/Constraint for edit), JSON output contract, multimodal edit via Gemini, optional mask-based inpainting via OpenAI. Distributed via skills CLI (`npx skills add`), not npm registry.",
   "scripts": {
@@ -9,7 +9,8 @@
   "files": [
     "SKILL.md",
     "scripts/",
-    "references/"
+    "references/",
+    ".env.example"
   ],
   "keywords": [
     "claude-code",
