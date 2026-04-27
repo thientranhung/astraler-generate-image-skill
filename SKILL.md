@@ -53,6 +53,8 @@ The script auto-resolves `.env` from these locations (first hit wins):
 6. `~/.agents/skills/astraler-generate-image/.env`
 7. `./.env`
 
+**Env-var precedence:** values already exported in the harness's process environment (`GEMINI_API_KEY`, `OPENAI_API_KEY`, `IMAGE_MODEL`) take priority over what's in `.env` — the `.env` only fills in keys that aren't already set. This lets a harness inject keys at runtime without editing the file.
+
 You usually don't need to do anything — just locate the skill directory for invoking the script:
 
 ```bash
@@ -242,10 +244,10 @@ When `ok: true`, return the `output_path` to the caller so the harness can rende
 | `gpt-image-1-mini` | ⭐⭐⭐ | Fast | Cheaper, good for drafts — use shorter prompts |
 | `gpt-image-2` | ⭐⭐⭐⭐⭐ | Medium | Requires org verification ⚠️ |
 
-Sizes:
+Sizes (OpenAI does **not** natively support 4:3 / 3:4 — the closest landscape/portrait size is substituted):
 - `1:1` → `1024x1024`
-- `16:9` / `4:3` → `1536x1024` (landscape)
-- `9:16` / `3:4` → `1024x1536` (portrait)
+- `16:9` → `1536x1024` (landscape) · `4:3` → `1536x1024` (substituted)
+- `9:16` → `1024x1536` (portrait) · `3:4` → `1024x1536` (substituted)
 
 Quality: `low` | `medium` | `high` | `auto`
 Format: `png` | `jpeg` | `webp`

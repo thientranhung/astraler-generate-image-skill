@@ -23,6 +23,7 @@ import base64
 import json
 import mimetypes
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -43,6 +44,14 @@ OPENAI_SIZE_MAP = {
 }
 
 DEFAULT_MODEL = "gemini-3-pro-image-preview"
+
+# Network timeout (seconds) — image generation typically takes 5-30s; cap at 90s
+# to prevent the agent harness from hanging indefinitely on a stalled connection.
+HTTP_TIMEOUT = 90
+
+# Whitelist of characters allowed in a model name. Prevents URL path-injection
+# (e.g. "foo/../bar") since the model is interpolated into the API URL.
+_MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 # ─── Env / path resolution ────────────────────────────────────────────────────
@@ -80,20 +89,46 @@ def candidate_env_paths(explicit: Optional[str]) -> List[str]:
     return paths
 
 
+def _parse_env_line(line: str):
+    """Parse one .env line into (key, value) or return None.
+
+    Handles common shell-style .env conventions:
+      - Leading `export ` prefix (so users can `source` the file too)
+      - Quoted values: 'foo' or "foo"
+      - Inline comments after an UNQUOTED value: KEY=value  # note
+        (Comments inside quotes are preserved verbatim.)
+    """
+    line = line.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        return None
+    if line.startswith("export "):
+        line = line[len("export "):].lstrip()
+    key, val = line.split("=", 1)
+    key = key.strip()
+    val = val.strip()
+    if val.startswith(("'", '"')) and len(val) >= 2 and val[0] == val[-1]:
+        val = val[1:-1]
+    elif "#" in val:
+        val = val.split("#", 1)[0].rstrip()
+    return key, val
+
+
 def load_env(explicit: Optional[str] = None) -> Optional[str]:
-    """Load .env into os.environ; return path used (or None)."""
+    """Load .env into os.environ; return path used (or None).
+
+    Values already set in os.environ are NOT overwritten — the harness's env
+    takes precedence over the .env file. Document this in SKILL.md.
+    """
     for p in candidate_env_paths(explicit):
         if p and os.path.isfile(p):
             with open(p, "r", encoding="utf-8") as f:
                 for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#") or "=" not in line:
+                    parsed = _parse_env_line(line)
+                    if parsed is None:
                         continue
-                    key, val = line.split("=", 1)
-                    # Don't overwrite values already in env (harness may have set them).
-                    key = key.strip()
+                    key, val = parsed
                     if key not in os.environ:
-                        os.environ[key] = val.strip().strip("'\"")
+                        os.environ[key] = val
             return p
     return None
 
@@ -102,10 +137,20 @@ def load_env(explicit: Optional[str] = None) -> Optional[str]:
 
 def detect_provider(model_name: str) -> str:
     """Auto-detect provider from model name."""
-    name = model_name.lower()
-    if name.startswith("gpt-image") or name.startswith("dall-e"):
+    if model_name.lower().startswith("gpt-image"):
         return "openai"
     return "google"
+
+
+def validate_model_name(model: str) -> None:
+    """Raise SystemExit if the model name contains characters unsafe for URL interpolation."""
+    if not _MODEL_NAME_RE.match(model):
+        # Not using fail() here because we don't have json_only/quiet context yet.
+        print(json.dumps({
+            "ok": False,
+            "error": f"Invalid model name {model!r}: must match {_MODEL_NAME_RE.pattern}",
+        }), file=sys.stdout)
+        sys.exit(1)
 
 
 def ext_for_mime(mime: Optional[str]) -> Optional[str]:
@@ -163,6 +208,15 @@ def fail(msg: str, *, json_only: bool, quiet: bool, **extra) -> NoReturn:
 
 # ─── HTTP helper ──────────────────────────────────────────────────────────────
 
+def _redact(text: str) -> str:
+    """Strip API keys / bearer tokens from error messages before they hit JSON output."""
+    # Google AI Studio key style: AIza... (39 chars). Bearer tokens / OpenAI sk-...
+    text = re.sub(r"AIza[0-9A-Za-z_-]{20,}", "AIza***REDACTED***", text)
+    text = re.sub(r"sk-[A-Za-z0-9_-]{16,}", "sk-***REDACTED***", text)
+    text = re.sub(r"[?&]key=[^&\s\"']+", "?key=***REDACTED***", text)
+    return text
+
+
 def post_json(url: str, payload: dict, *, headers: Optional[dict] = None,
               provider: str, model: str, json_only: bool, quiet: bool) -> dict:
     """POST JSON payload, return parsed response. Calls fail() (which exits) on any error."""
@@ -170,14 +224,14 @@ def post_json(url: str, payload: dict, *, headers: Optional[dict] = None,
     req_headers = {"Content-Type": "application/json", **(headers or {})}
     req = urllib.request.Request(url, data=body, headers=req_headers)
     try:
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         err_body = e.read().decode("utf-8", errors="replace")
-        fail(f"{provider.title()} HTTP {e.code}: {err_body}",
+        fail(f"{provider.title()} HTTP {e.code}: {_redact(err_body)}",
              json_only=json_only, quiet=quiet, provider=provider, model=model)
     except Exception as e:  # noqa: BLE001 — any failure surfaces to JSON
-        fail(f"{provider.title()} request failed: {e}",
+        fail(f"{provider.title()} request failed: {_redact(str(e))}",
              json_only=json_only, quiet=quiet, provider=provider, model=model)
 
 
@@ -229,7 +283,7 @@ def generate_openai(args, *, json_only: bool, quiet: bool) -> dict:
             fail("OpenAI returned no image bytes or URL.",
                  json_only=json_only, quiet=quiet,
                  provider="openai", model=args.model)
-        with urllib.request.urlopen(img_url) as r:
+        with urllib.request.urlopen(img_url, timeout=HTTP_TIMEOUT) as r:
             image_data = r.read()
 
     output_file = replace_ext(args.output, "jpg" if args.format == "jpeg" else args.format)
@@ -266,12 +320,14 @@ def generate_google(args, *, json_only: bool, quiet: bool) -> dict:
             provider="google", model=args.model,
         )
 
-    encoded_model = urllib.parse.quote(args.model)
+    # safe='' — don't preserve any path separators in the model name.
+    encoded_model = urllib.parse.quote(args.model, safe="")
     is_gemini = args.model.startswith("gemini")
+    method = "generateContent" if is_gemini else "predict"
+    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+           f"{encoded_model}:{method}")
 
     if is_gemini:
-        url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-               f"{encoded_model}:generateContent?key={api_key}")
         # Gemini image-preview models read aspect ratio from prompt text.
         payload = {
             "contents": [
@@ -279,9 +335,7 @@ def generate_google(args, *, json_only: bool, quiet: bool) -> dict:
             ]
         }
     else:
-        # Imagen models use the :predict endpoint with a different payload shape.
-        url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-               f"{encoded_model}:predict?key={api_key}")
+        # Imagen models use :predict with a different payload shape.
         payload = {
             "instances": [{"prompt": args.prompt}],
             "parameters": {
@@ -292,8 +346,11 @@ def generate_google(args, *, json_only: bool, quiet: bool) -> dict:
         }
 
     started = time.time()
+    # Pass API key in header, not URL. Keeps it out of error messages, server
+    # logs, and HTTP referrers.
     result = post_json(
         url, payload,
+        headers={"x-goog-api-key": api_key},
         provider="google", model=args.model,
         json_only=json_only, quiet=quiet,
     )
@@ -361,8 +418,8 @@ def main() -> None:
     parser.add_argument("--provider", choices=["google", "openai", "auto"], default="auto",
                         help="Provider hint; auto = infer from model name")
     parser.add_argument("--quality", default="auto",
-                        choices=["auto", "low", "medium", "high", "standard", "hd"],
-                        help="OpenAI GPT-image: low/medium/high; DALL-E 3: hd/standard")
+                        choices=["auto", "low", "medium", "high"],
+                        help="OpenAI GPT-image quality (low | medium | high | auto)")
     parser.add_argument("--format", default="png", choices=["png", "jpeg", "webp"],
                         help="Output format for OpenAI GPT-image (default: png)")
     parser.add_argument("--background", default="auto",
@@ -381,6 +438,7 @@ def main() -> None:
     env_used = load_env(args.env_file)
 
     args.model = args.model or os.environ.get("IMAGE_MODEL", DEFAULT_MODEL)
+    validate_model_name(args.model)
     provider = args.provider if args.provider != "auto" else detect_provider(args.model)
 
     json_only = args.json
