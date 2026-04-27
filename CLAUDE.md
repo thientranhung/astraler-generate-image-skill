@@ -1,10 +1,11 @@
 # CLAUDE.md — astraler-generate-image-skill
 
-A standalone Python CLI skill for generating images via Google Gemini/Imagen
-and OpenAI GPT-image, designed to be invoked from AI agent harnesses (Claude
-Code, Antigravity, Obsidian Agent Client). The agent reads `SKILL.md` for the
-trigger description and prompt-enhancement framework, then runs
-`scripts/generate.py`.
+A standalone Python CLI skill for **generating AND editing** images via Google
+Gemini/Imagen and OpenAI GPT-image, designed to be invoked from AI agent
+harnesses (Claude Code, Antigravity, Obsidian Agent Client). The agent reads
+`SKILL.md` for the trigger description and prompt-enhancement framework, then
+runs `scripts/generate.py`. Two modes — auto-detected from `--input_image`:
+**generate** (text → image) and **edit** (text + image → modified image).
 
 > If the parent `my-skills/CLAUDE.md` is also loaded (i.e. you're working
 > inside the monorepo), it has additional shared conventions. This file is
@@ -47,6 +48,15 @@ without checking with the user — it's intentional to avoid spamming.
   server logs, and HTTP referrers.
 - **Validate `--model`** before URL interpolation — `^[A-Za-z0-9._-]+$`. Pass
   `safe=''` to `urllib.parse.quote`.
+- **Edit mode** activates when `--input_image` is provided. Routing rules:
+  Gemini multimodal (`gemini-*`) for free-form edits; OpenAI `/v1/images/edits`
+  (multipart) when `--mask` is given. Imagen `:predict` does NOT accept image
+  input — `edit_google` rejects non-Gemini models early.
+- **Edit prompts** use a different framework than generate: **Preserve / Change /
+  Constraint** (explicit about what stays vs changes). Models drift if the user's
+  raw "make it cyberpunk" goes through unenhanced. See SKILL.md examples F-J.
+- **Input image limit**: 18 MB (`MAX_INPUT_BYTES`). Above this, fail before
+  network. Caller agent should resize/compress upstream if needed.
 
 ## File Map
 
@@ -64,16 +74,25 @@ without checking with the user — it's intentional to avoid spamming.
 
 ## Smoke Test
 
-End-to-end test (~5-30s, real API call — needs `GEMINI_API_KEY` in `.env`):
+End-to-end tests (~5-30s each, real API call — need `GEMINI_API_KEY` in `.env`):
 
+**Generate mode:**
 ```bash
 python3 scripts/generate.py \
   --prompt "a red apple on a wooden table, photorealistic, soft window light" \
-  --output /tmp/test.png \
-  --json
+  --output /tmp/test.png --json
 ```
 
-Verify: stdout last line has `"ok": true`, file at `output_path` opens.
+**Edit mode (uses output of the generate test as input):**
+```bash
+python3 scripts/generate.py \
+  --prompt "Restyle as Studio Ghibli watercolor. Preserve apple shape and table. Change rendering style only." \
+  --input_image /tmp/test.png \
+  --output /tmp/test_ghibli.png \
+  --model gemini-3-pro-image-preview --json
+```
+
+Verify: stdout last line has `"ok": true`, `mode: "generate"` or `"edit"`, file at `output_path` opens.
 Note: the file extension may differ from `--output` (e.g. `.jpg` instead of
 `.png`) if the model returned JPEG.
 

@@ -67,6 +67,8 @@ IMAGE_MODEL=gemini-3-pro-image-preview
 
 After configuration, talk to your AI agent. The skill activates only when you mention **"Astraler"**.
 
+### Generate (text → image)
+
 **Google Gemini / Imagen (default):**
 ```
 "Astraler tạo ảnh một thành phố cyberpunk về đêm"
@@ -82,7 +84,28 @@ After configuration, talk to your AI agent. The skill activates only when you me
 "astraler chatgpt image vẽ poster phim sci-fi"
 ```
 
-> The skill does structured prompt enhancement (Subject / Composition / Style / Lighting / Mood / Technical / Negative) before calling the API — short prompts like "vẽ con mèo" become detailed scene descriptions for noticeably better output. See `SKILL.md` for the full framework and provider-specific prompt-style guidance.
+### Edit (image + text → modified image) — NEW in v1.2
+
+Attach an image (paste, drag, or refer to a previously generated one) and use an editing verb:
+
+```
+"Astraler chỉnh ảnh này theo phong cách Studio Ghibli"     # restyle
+"Astraler đổi background ảnh trên sang bãi biển hoàng hôn" # background swap
+"Astraler thêm con đường mòn vào ảnh phong cảnh này"       # add element
+"Astraler chỉnh ảnh vừa rồi cho ánh sáng ấm hơn"           # iterate previous output
+"astraler image gpt edit ảnh này, xóa người bên trái"      # OpenAI inpainting (mask)
+```
+
+The skill auto-detects edit mode when an input image is provided. Gemini handles free-form edits (restyle, scene changes, additions/removals) by default; OpenAI is used when a precise mask is supplied.
+
+### Prompt enhancement
+
+The skill applies structured prompt enhancement before calling the API — short user prompts become detailed instructions for noticeably better output:
+
+- **Generate mode**: 7-component framework (Subject / Composition / Style / Lighting / Mood / Technical / Negative)
+- **Edit mode**: Preserve / Change / Constraint — explicitly tells the model what to keep vs change so it doesn't drift
+
+See `SKILL.md` for both frameworks, per-provider style guidance, and worked before/after examples.
 
 ---
 
@@ -127,6 +150,7 @@ The script always emits a final single-line **JSON contract** on stdout that the
 ```json
 {
   "ok": true,
+  "mode": "generate",
   "provider": "google",
   "model": "imagen-4.0-generate-001",
   "output_path": "/abs/path/to/output.png",
@@ -135,9 +159,13 @@ The script always emits a final single-line **JSON contract** on stdout that the
   "bytes_size": 1318300,
   "prompt": "<enhanced prompt that was sent>",
   "enhanced_from": "<user's raw request>",
+  "input_images": [],
+  "mask": null,
   "duration_ms": 4585
 }
 ```
+
+In **edit mode**, the same schema is used with `mode: "edit"`, `input_images: ["/abs/path/to/source.png"]`, and `mask` set to the mask path or `null`.
 
 > **Important:** read the file path from `output_path`, not from the `--output` argument. Some Google models (e.g. `gemini-3-pro-image-preview`) return JPEG inline data even when you request a `.png`; the script honors the actual response MIME and rewrites the extension so the file on disk matches its bytes.
 
