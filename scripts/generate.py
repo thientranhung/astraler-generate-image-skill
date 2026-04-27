@@ -237,6 +237,30 @@ def _extract_gemini_inline(result: dict) -> Tuple[Optional[str], Optional[str]]:
     return None, None
 
 
+def _gemini_refusal_reason(result: dict) -> Optional[str]:
+    """Surface why Gemini didn't produce an image, if it told us.
+
+    Common causes: safety blocks (`promptFeedback.blockReason`), early stop
+    (`candidates[0].finishReason != STOP`), or a text-only refusal in the
+    parts array. Returns None if the response shape gives no hint and the
+    caller should fall back to a generic error.
+    """
+    pf = result.get("promptFeedback") or {}
+    if pf.get("blockReason"):
+        return f"Gemini refused (promptFeedback): {pf['blockReason']}"
+    cands = result.get("candidates") or []
+    if cands:
+        finish = cands[0].get("finishReason")
+        if finish and finish != "STOP":
+            return f"Gemini stopped early (finishReason): {finish}"
+        # Text-only response: model spoke instead of drawing.
+        for part in cands[0].get("content", {}).get("parts", []):
+            text = part.get("text")
+            if text:
+                return f"Gemini returned text instead of an image: {text[:200]}"
+    return None
+
+
 def _decode_and_write(b64: str, output: str, ext: Optional[str]) -> Tuple[str, bytes]:
     """Decode a base64 image and write it to `output`, rewriting extension to `ext`.
 
@@ -284,8 +308,8 @@ def _build_result(args, *, mode: str, provider: str, output_path: str,
 
     Provider-specific fields (quality, format, size, usage) are passed via
     **extras to override defaults. Keeps the JSON contract symmetric across
-    generate/edit and across providers — callers don't have to branch on
-    optional keys.
+    generate/edit and across providers — every key listed below is present
+    in EVERY result, so callers never have to branch on optional keys.
     """
     return {
         "ok": True,
@@ -302,7 +326,11 @@ def _build_result(args, *, mode: str, provider: str, output_path: str,
         "mask": os.path.abspath(args.mask) if args.mask else None,
         "duration_ms": int((time.time() - started) * 1000),
         # Defaults below — provider-specific callers override via **extras.
+        # All four keys are always present in the JSON output so callers can
+        # safely do result["quality"] without a KeyError on Google results.
         "size": None,
+        "quality": None,
+        "format": None,
         "usage": None,
         **extras,
     }
@@ -513,7 +541,8 @@ def generate_google(args, *, json_only: bool, quiet: bool) -> dict:
             response_mime = predictions[0].get("mimeType") or "image/png"
 
     if not b64_image:
-        fail("Google returned no image bytes.",
+        msg = _gemini_refusal_reason(result) if is_gemini else None
+        fail(msg or "Google returned no image bytes.",
              json_only=json_only, quiet=quiet,
              provider="google", model=args.model, raw=result)
 
@@ -587,8 +616,8 @@ def edit_google(args, *, json_only: bool, quiet: bool) -> dict:
 
     b64_image, response_mime = _extract_gemini_inline(result)
     if not b64_image:
-        fail("Google returned no image bytes (model may have refused or "
-             "returned only text — check input image and prompt).",
+        fail(_gemini_refusal_reason(result)
+             or "Google returned no image bytes (model may have refused).",
              json_only=json_only, quiet=quiet,
              provider="google", model=args.model, raw=result)
 
@@ -628,8 +657,13 @@ def edit_openai(args, *, json_only: bool, quiet: bool) -> dict:
         fail(str(e), json_only=json_only, quiet=quiet,
              provider="openai", model=args.model)
 
+    # Use synthetic ASCII filenames in the multipart body. OpenAI routes parts
+    # by the `name=` field ("image" / "mask"), not by `filename=`, so the user's
+    # actual filename is purely informational. Synthesizing it eliminates the
+    # multipart-header injection class entirely (a real filename containing `"`
+    # or CRLF — legal on POSIX — would break the multipart frame).
     files: Dict[str, Tuple[str, bytes, str]] = {
-        "image": (os.path.basename(args.input_image), img_bytes, img_mime),
+        "image": (f"image.{ext_for_mime(img_mime) or 'png'}", img_bytes, img_mime),
     }
     if args.mask:
         try:
@@ -637,7 +671,7 @@ def edit_openai(args, *, json_only: bool, quiet: bool) -> dict:
         except ValueError as e:
             fail(f"mask: {e}", json_only=json_only, quiet=quiet,
                  provider="openai", model=args.model)
-        files["mask"] = (os.path.basename(args.mask), mask_bytes, mask_mime)
+        files["mask"] = (f"mask.{ext_for_mime(mask_mime) or 'png'}", mask_bytes, mask_mime)
 
     size = OPENAI_SIZE_MAP.get(args.aspect_ratio, "auto")
     fields: Dict[str, str] = {
@@ -668,9 +702,14 @@ def edit_openai(args, *, json_only: bool, quiet: bool) -> dict:
 
     b64_image = images[0].get("b64_json")
     if not b64_image:
-        fail("OpenAI edit returned no image bytes (b64_json missing).",
-             json_only=json_only, quiet=quiet,
-             provider="openai", model=args.model)
+        # Surface the API's own error if it included one — `result["error"]`
+        # is OpenAI's documented error envelope shape.
+        api_err = (result.get("error") or {}).get("message") if isinstance(result, dict) else None
+        msg = "OpenAI edit returned no image bytes (b64_json missing)."
+        if api_err:
+            msg += f" API: {api_err}"
+        fail(msg, json_only=json_only, quiet=quiet,
+             provider="openai", model=args.model, raw=result)
 
     output_ext = "jpg" if args.format == "jpeg" else args.format
     output_file, image_data = _decode_and_write(b64_image, args.output, output_ext)
